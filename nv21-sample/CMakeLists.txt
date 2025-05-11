@@ -19,7 +19,7 @@ elseif (UNIX)
 
     # 如果只是优先查找静态库，保证 .a 后缀在前面即可，把默认的后缀加上
     # set(CMAKE_FIND_LIBRARY_SUFFIXES .a ${CMAKE_FIND_LIBRARY_SUFFIXES})
-endif()
+endif ()
 
 # If the package has been found, several variables will
 # be set, you can find the full list with descriptions
@@ -32,7 +32,6 @@ message(STATUS "    libraries: ${OpenCV_LIBS}")
 message(STATUS "    include path: ${OpenCV_INCLUDE_DIRS}")
 
 include_directories(${OpenCV_INCLUDE_DIRS})
-
 
 
 # Declare the executable target built from your sources
