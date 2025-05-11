@@ -1,0 +1,3 @@
+ffplay -f rawvideo -pixel_format nv21 -video_size 640*480 input_640x480.nv21
+ffmpeg -f rawvideo -pixel_format nv21 -video_size 640*480 -i input_640x480.nv21 -frames:v 1 input_640x480.nv21.png
+./display_nv21_image input_640x480.nv21 640 480
