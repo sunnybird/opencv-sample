@@ -217,88 +217,200 @@ void affine_transform(NV21Image* dst, const NV21Image* src, AffineMatrix mat)
 }
 
 
+// 双线性插值
+uint8_t bilinear_interp(float x, float y, const uint8_t* img, int width, int height)
+{
+    int x0 = (int)floor(x);
+    int y0 = (int)floor(y);
+    int x1 = x0 + 1;
+    int y1 = y0 + 1;
+
+    // 边界处理
+    x0 = (x0 < 0) ? 0 : (x0 >= width ? width - 1 : x0);
+    y0 = (y0 < 0) ? 0 : (y0 >= height ? height - 1 : y0);
+    x1 = (x1 < 0) ? 0 : (x1 >= width ? width - 1 : x1);
+    y1 = (y1 < 0) ? 0 : (y1 >= height ? height - 1 : y1);
+
+    float dx = x - x0;
+    float dy = y - y0;
+
+    // 四个相邻像素值
+    uint8_t val00 = img[y0 * width + x0];
+    uint8_t val01 = img[y0 * width + x1];
+    uint8_t val10 = img[y1 * width + x0];
+    uint8_t val11 = img[y1 * width + x1];
+
+    // 插值计算
+    float val = (1 - dx) * (1 - dy) * val00 + dx * (1 - dy) * val01 + (1 - dx) * dy * val10 +
+                dx * dy * val11;
+
+    return (uint8_t)(val + 0.5f);
+}
+
+// YUV仿射变换核心函数
+void warp_affine(const NV21Image* src, NV21Image* dst, const AffineMatrix* mat)
+{
+    // Y分量处理
+    for (int y = 0; y < dst->height; ++y) {
+        for (int x = 0; x < dst->width; ++x) {
+            // 反向映射
+            float src_x = mat->a * x + mat->b * y + mat->c;
+            float src_y = mat->d * x + mat->e * y + mat->f;
+
+            // 边界检查
+            if (src_x < 0 || src_x >= src->width || src_y < 0 || src_y >= src->height) {
+                dst->y[y * dst->width + x] = 0;
+                continue;
+            }
+
+            // 双线性插值
+            dst->y[y * dst->width + x] =
+                bilinear_interp(src_x, src_y, src->y, src->width, src->height);
+        }
+    }
+
+    // UV分量处理（NV21格式）
+    for (int y = 0; y < dst->height / 2; ++y) {
+        for (int x = 0; x < dst->width; x += 2) {
+            float src_x = mat->a * (x * 2) + mat->b * (y * 2) + mat->c;
+            float src_y = mat->d * (x * 2) + mat->e * (y * 2) + mat->f;
+
+            // 计算UV坐标（NV21的UV分量是交错存储的）
+            int uv_x = (int)(src_x / 2);
+            int uv_y = (int)(src_y / 2);
+
+            // 边界检查
+            if (uv_x < 0 || uv_x >= src->width / 2 || uv_y < 0 || uv_y >= src->height / 2) {
+                dst->vu[y * dst->width + x]     = 128;   // 中性灰色
+                dst->vu[y * dst->width + x + 1] = 128;
+                continue;
+            }
+
+            // 直接采样（可改为插值）
+            int src_index                   = uv_y * src->width + 2 * uv_x;
+            dst->vu[y * dst->width + x]     = src->vu[src_index];       // V分量
+            dst->vu[y * dst->width + x + 1] = src->vu[src_index + 1];   // U分量
+        }
+    }
+}
+
 // 示例主函数
 int main()
 {
     int ret = -1;
-    // 创建测试图像(640x480)
-    NV21Image* src = create_nv21(640, 480);
-    NV21Image* dst = create_nv21(640, 480);
 
-    ret = read_nv21_file(src, "../input_640x480.nv21");
+    int src_width  = 640;
+    int src_height = 480;
+
+    int dst_width  = 640;
+    int dst_height = 480;
+
+    int dst_crop_width  = 224;
+    int dst_crop_height = 224;
+
+    NV21Image* src = create_nv21(src_width, src_height);
+    NV21Image* dst = create_nv21(dst_crop_width, dst_crop_height);
+
+    char inputFile[] = "../data/examples_from_paper/prn_example_face";
+    char outputFile[] = "../data/examples_from_paper/c_prn_example_face";
+    char outputCropFile[] = "../data/examples_from_paper/c_prn_example_face_crop";
+
+
+    // char inputFile[] = "../data/image_158";
+    // char outputFile[] = "../data/c_output_image_158";
+    // char outputCropFile[] = "../data/c_output_image_158_crop";
+
+    char input_path[1026];
+    sprintf(input_path,
+            "%s_%dx%d.nv21",
+            inputFile,
+            src->width,
+            src->height);
+
+    char out_path[1204];
+    sprintf(out_path,
+            "%s_%dx%d.nv21",
+            outputFile,
+            src->width,
+            src->height);
+
+    char out_crop_path[1204];
+    sprintf(out_crop_path,
+            "%s_%dx%d.nv21",
+            outputCropFile,
+            dst_crop_width,
+            dst_crop_height);
+
+    ret = read_nv21_file(src, input_path);
     if (ret != 0) {
-        goto free_src_dst;
-    }
-
-    {
-        // 创建30度旋转矩阵[2](@ref)
-        // AffineMatrix mat =create_rotation_matrix(90.0f);
-        // 创建复合变换矩阵：缩放1.5倍 + 平移(50,30) + 旋转30度
-        AffineMatrix scale     = create_centered_scale(1.5f, 1.5f, src->width, src->height);
-        AffineMatrix translate = create_translation_matrix(50, 30);
-        AffineMatrix rotate    = create_rotation_matrix(30.0f);
-
-
-        // AffineMatrix combined = matrix_multiply(translate, matrix_multiply(rotate, scale));
-        // AffineMatrix combined = matrix_multiply(translate, scale);
-        // AffineMatrix combined = scale;
-        AffineMatrix combined = translate;
-
-        // 执行仿射变换
-        affine_transform(dst, src, combined);
+        return ret;
     }
 
 
-    ret = write_nv21_file(dst, "../output_640x480_dpseek.nv21");
-    if (ret != 0) {
-        goto free_src_dst;
-    }
+    AffineMatrix param = {0.55722648, 0.12144679, -73.8135971, -0.12144679, 0.55722648, 3.02248176};
+
+    // AffineMatrix param = {0.881481,   0.000000,    -36.529630,  -0.000000,   0.881481,   -9.288889};
+
+    float angle   = atanf(param.b / param.e) * 180.0f / M_PI;
+    float sx      = param.a / cosf(angle);
+    float sy      = param.e / cosf(angle);
+    float trans_x = param.c;
+    float trans_y = param.f;
+
+    // 创建30度旋转矩阵[2](@ref)
+    // AffineMatrix mat =create_rotation_matrix(90.0f);
+    // 创建复合变换矩阵：缩放1.5倍 + 平移(50,30) + 旋转30度
+    // AffineMatrix scale     = create_centered_scale(2.0f, 2.0f, src->width, src->height);
+    // AffineMatrix translate = create_translation_matrix((src->width/2)-(-73), src->height/2 - 3);
+    // AffineMatrix rotate    = create_rotation_matrix(6.973f + 3.0f);
+
+    AffineMatrix scale     = create_centered_scale( 1/sx, 1/sy, src->width, src->height);
+    AffineMatrix translate = create_translation_matrix( trans_x,  trans_y);
+    AffineMatrix rotate    = create_rotation_matrix(angle);
+
+
+    // AffineMatrix combined = matrix_multiply(translate, matrix_multiply(rotate, scale));
+    AffineMatrix combined = matrix_multiply(translate, matrix_multiply(scale, rotate));
+    // AffineMatrix combined = matrix_multiply(scale, matrix_multiply(rotate, translate));
+    // AffineMatrix combined = matrix_multiply(scale, rotate);
+
+    // AffineMatrix combined = scale;
+    // AffineMatrix combined = {
+    //     0.55722648, 0.12144679, -73.8135971,
+    //     -0.12144679, 0.55722648, 3.02248176};
+
+
+    // AffineMatrix combined = {
+    //     0.55722648, 0.12144679, -73.8135971,
+    //     -0.12144679, 0.55722648, 3.02248176};
+
+    // 执行仿射变换
+    affine_transform(dst, src, param);
+    // warp_affine(src, dst, &combined);
+
+   int offset_left = tanf(angle) * dst_crop_height;
+
+    ret = write_nv21_file(dst, out_crop_path);
 
     // 执行裁剪（左上角(100,50)，尺寸400x300）
-    NV21Image* dst2_cropped = crop_nv21(dst, 100, 50, 400, 300);
-    mirror_nv21(dst2_cropped);
+    // NV21Image* dst2_cropped = NULL;
+    // dst2_cropped            = crop_nv21(dst,
+    //                          abs(trans_x),
+    //                          abs(trans_y),
+    //                          dst_crop_width,
+    //                          dst_crop_height);
+    // ret                     = write_nv21_file(dst2_cropped, out_crop_path);
 
-    ret = write_nv21_file(dst2_cropped, "../output_400x300_dpseek_crop.nv21");
-    if (ret != 0) {
-        goto exit;
-    }
 
-    return 0;
+
 
     // 释放资源
 exit:
-    free_nv21(dst2_cropped);
+    // free_nv21(dst2_cropped);
 
 free_src_dst:
     free_nv21(src);
     free_nv21(dst);
 
     return ret;
-
-    // // 创建测试图像(640x480)
-    // NV21Image* src = create_nv21(640, 480);
-    // read_nv21_file(src, "../input_640x480.nv21");
-    //
-    // // 执行镜像处理[6,8](@ref)
-    // mirror_nv21(src);
-    //
-    // // 创建复合变换矩阵
-    // AffineMatrix rotate = create_rotation_matrix(30.0f);
-    // AffineMatrix scale = create_scale_matrix(1.5f, 1.5f);
-    // AffineMatrix trans = matrix_multiply(rotate, scale);
-    //
-    // // 执行仿射变换
-    // NV21Image* transformed = create_nv21(640, 480);
-    // affine_transform(transformed, src, trans);
-    // write_nv21_file(transformed, "../output_640x480_dpseek.nv21");
-    //
-    // // 裁剪结果图像
-    // NV21Image* cropped = crop_nv21_v1(transformed, 100, 50, 400, 300);
-    // write_nv21_file(cropped, "../output_640x480_dpseek_crop.nv21");
-    //
-    // // 释放资源
-    // free_nv21(src);
-    // free_nv21(transformed);
-    // free_nv21(cropped);
-    return 0;
 }
