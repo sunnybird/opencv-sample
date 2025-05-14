@@ -1,190 +1,223 @@
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <stdint.h>
-#include <math.h>
-#include <string.h>
 
-#define CLAMP(x, min, max) ((x) < (min) ? (min) : ((x) > (max) ? (max) : (x)))
+// 定义 NV21 图像结构体
+typedef struct
+{
+    unsigned char* y_plane;    // Y 平面
+    unsigned char* uv_plane;   // UV 平面 (交错的 VU)
+    int            width;      // 图像宽度
+    int            height;     // 图像高度
+} NV21Image;
 
-// 双线性插值采样（单通道）
-uint8_t bilinear_sample(const uint8_t *src, int width, int height, float x, float y) {
-    int x0 = (int) floorf(x), x1 = x0 + 1;
-    int y0 = (int) floorf(y), y1 = y0 + 1;
+// 定义仿射变换矩阵结构体
+typedef struct
+{
+    float m[3][3];   // 3x3 仿射变换矩阵
+} AffineMatrix;
 
-    float dx = x - x0, dy = y - y0;
-
-    x0 = CLAMP(x0, 0, width - 1);
-    x1 = CLAMP(x1, 0, width - 1);
-    y0 = CLAMP(y0, 0, height - 1);
-    y1 = CLAMP(y1, 0, height - 1);
-
-    uint8_t p00 = src[y0 * width + x0];
-    uint8_t p01 = src[y0 * width + x1];
-    uint8_t p10 = src[y1 * width + x0];
-    uint8_t p11 = src[y1 * width + x1];
-
-    float w00 = (1 - dx) * (1 - dy);
-    float w01 = dx * (1 - dy);
-    float w10 = (1 - dx) * dy;
-    float w11 = dx * dy;
-
-    return (uint8_t) (p00 * w00 + p01 * w01 + p10 * w10 + p11 * w11 + 0.5f);
+int read_nv21_file(NV21Image* img, const char* filename)
+{
+    FILE* fp = fopen(filename, "rb");
+    if (fp != NULL) {
+        fread(img->y_plane, img->width * img->height, 1, fp);
+        fread(img->uv_plane, img->width * img->height / 2, 1, fp);
+        fclose(fp);
+        printf("read nv21file: %s  \n", filename);
+        return 0;
+    }
+    return -1;
 }
 
-// Y 通道仿射
-void affine_transform_y(
-    const uint8_t *src, int srcW, int srcH,
-    uint8_t *dst, int dstW, int dstH,
-    float a, float b, float c, float d, float tx, float ty) {
-    for (int y = 0; y < dstH; y++) {
-        for (int x = 0; x < dstW; x++) {
-            float srcX = a * x + b * y + tx;
-            float srcY = c * x + d * y + ty;
-            dst[y * dstW + x] = bilinear_sample(src, srcW, srcH, srcX, srcY);
+int write_nv21_file(NV21Image* img, const char* filename)
+{
+    FILE* fp = fopen(filename, "wb");
+    if (fp) {
+        fwrite(img->y_plane, img->width * img->height, 1, fp);
+        fwrite(img->uv_plane, img->width * img->height / 2, 1, fp);
+        fclose(fp);
+        printf("write nv21file: %s  \n", filename);
+        return 0;
+    }
+    return -1;
+}
+
+// 计算仿射矩阵的逆
+int invert_affine_matrix(const AffineMatrix* mat, AffineMatrix* inv)
+{
+    float a = mat->m[0][0], b = mat->m[0][1], c = mat->m[0][2];
+    float d = mat->m[1][0], e = mat->m[1][1], f = mat->m[1][2];
+
+    float det = a * e - b * d;
+    if (fabs(det) < 1e-6) return 0;   // 不可逆
+
+    float inv_det = 1.0f / det;
+
+    inv->m[0][0] = e * inv_det;
+    inv->m[0][1] = -b * inv_det;
+    inv->m[0][2] = (b * f - c * e) * inv_det;
+
+    inv->m[1][0] = -d * inv_det;
+    inv->m[1][1] = a * inv_det;
+    inv->m[1][2] = (c * d - a * f) * inv_det;
+
+    inv->m[2][0] = 0;
+    inv->m[2][1] = 0;
+    inv->m[2][2] = 1;
+
+    return 1;
+}
+
+// 双线性插值（用于Y）
+unsigned char bilinear_sample(const unsigned char* data, int width, int height, float x, float y)
+{
+    int x0 = (int)floorf(x);
+    int y0 = (int)floorf(y);
+    int x1 = x0 + 1;
+    int y1 = y0 + 1;
+
+    if (x0 < 0 || y0 < 0 || x1 >= width || y1 >= height) return 0;
+
+    float dx = x - x0;
+    float dy = y - y0;
+
+    unsigned char p00 = data[y0 * width + x0];
+    unsigned char p01 = data[y0 * width + x1];
+    unsigned char p10 = data[y1 * width + x0];
+    unsigned char p11 = data[y1 * width + x1];
+
+    float val =
+        (1 - dx) * (1 - dy) * p00 + dx * (1 - dy) * p01 + (1 - dx) * dy * p10 + dx * dy * p11;
+
+    return (unsigned char)(val + 0.5f);
+}
+
+// 取最近的UV（无插值，逐块复制）
+void sample_uv(const unsigned char* src_uv, int src_width, int src_height, float x, float y,
+               unsigned char* v_out, unsigned char* u_out)
+{
+    int uv_x = (int)(x / 2);
+    int uv_y = (int)(y / 2);
+
+    if (uv_x < 0 || uv_x >= src_width / 2 || uv_y < 0 || uv_y >= src_height / 2) {
+        *v_out = 128;
+        *u_out = 128;
+        return;
+    }
+
+    int offset = (uv_y * src_width) + (uv_x * 2);
+    *v_out     = src_uv[offset + 0];   // V
+    *u_out     = src_uv[offset + 1];   // U
+}
+
+void affine_transform(NV21Image* dst, const NV21Image* src, AffineMatrix mat)
+{
+    AffineMatrix inv;
+    if (!invert_affine_matrix(&mat, &inv)) {
+        // 不可逆变换
+        return;
+    }
+
+    int dst_w = dst->width;
+    int dst_h = dst->height;
+    int src_w = src->width;
+    int src_h = src->height;
+
+    // 处理 Y 分量
+    for (int y_dst = 0; y_dst < dst_h; ++y_dst) {
+        for (int x_dst = 0; x_dst < dst_w; ++x_dst) {
+            // 计算源图像坐标
+            float x_src = inv.m[0][0] * x_dst + inv.m[0][1] * y_dst + inv.m[0][2];
+            float y_src = inv.m[1][0] * x_dst + inv.m[1][1] * y_dst + inv.m[1][2];
+
+            dst->y_plane[y_dst * dst_w + x_dst] =
+                bilinear_sample(src->y_plane, src_w, src_h, x_src, y_src);
+        }
+    }
+
+    // 处理 UV 分量（每 2x2 像素一个块）
+    for (int y = 0; y < dst_h; y += 2) {
+        for (int x = 0; x < dst_w; x += 2) {
+            float x_src = inv.m[0][0] * x + inv.m[0][1] * y + inv.m[0][2];
+            float y_src = inv.m[1][0] * x + inv.m[1][1] * y + inv.m[1][2];
+
+            unsigned char v, u;
+            sample_uv(src->uv_plane, src_w, src_h, x_src, y_src, &v, &u);
+
+            int offset                = (y / 2) * dst_w + x;
+            dst->uv_plane[offset + 0] = v;
+            dst->uv_plane[offset + 1] = u;
         }
     }
 }
 
-// 用于处理 V/U 分量的仿射函数（通用）
-void affine_transform_plane(
-    const uint8_t *src, int srcW, int srcH,
-    uint8_t *dst, int dstW, int dstH,
-    float a, float b, float c, float d, float tx, float ty) {
-    for (int y = 0; y < dstH; y++) {
-        for (int x = 0; x < dstW; x++) {
-            float srcX = a * x + b * y + tx;
-            float srcY = c * x + d * y + ty;
-            dst[y * dstW + x] = bilinear_sample(src, srcW, srcH, srcX, srcY);
-        }
-    }
-}
+int main()
+{
+    // 创建源和目标 NV21 图像（假设图像大小为 640x480）
+    NV21Image src, dst;
+    src.width    = 640;
+    src.height   = 480;
+    src.y_plane  = malloc(src.width * src.height);
+    src.uv_plane = malloc(src.width * src.height / 2);
 
-// 高质量 VU 仿射（V 和 U 分离后分别插值，再交错写入）
-void affine_transform_vu_high_quality(
-    const uint8_t *srcVU, int srcW, int srcH,
-    uint8_t *dstVU, int dstW, int dstH,
-    float a, float b, float c, float d, float tx, float ty) {
-    int srcUVW = srcW;
-    int srcUVH = srcH / 2;
-    int dstUVW = dstW;
-    int dstUVH = dstH / 2;
+    dst.width    = 224;
+    dst.height   = 224;
+    dst.y_plane  = malloc(dst.width * dst.height);
+    dst.uv_plane = malloc(dst.width * dst.height / 2);
 
-    int planeSize = (dstUVW / 2) * dstUVH;
 
-    uint8_t *srcV = (uint8_t *) malloc(planeSize * 4); // 原始可能更大
-    uint8_t *srcU = (uint8_t *) malloc(planeSize * 4);
+    char inputFile[]      = "../data/examples_from_paper/prn_example_face";
+    char outputFile[]     = "../data/examples_from_paper/c_prn_example_face";
+    char outputCropFile[] = "../data/examples_from_paper/c_prn_example_face_crop";
 
-    // 分离 V 和 U
-    for (int y = 0; y < srcUVH; y++) {
-        for (int x = 0; x < srcUVW; x += 2) {
-            int idx = y * srcUVW + x;
-            int p = y * (srcUVW / 2) + x / 2;
-            srcV[p] = srcVU[idx]; // V
-            srcU[p] = srcVU[idx + 1]; // U
-        }
-    }
+    // char inputFile[]      = "../data/image_158";
+    // char outputFile[]     = "../data/c_output_image_158";
+    // char outputCropFile[] = "../data/c_output_image_158_crop";
 
-    // 目标 V 和 U 平面
-    uint8_t *dstV = (uint8_t *) malloc(planeSize);
-    uint8_t *dstU = (uint8_t *) malloc(planeSize);
 
-    // 注意：UV 分辨率是原图 1/2
-    affine_transform_plane(srcV, srcUVW / 2, srcUVH, dstV, dstUVW / 2, dstUVH,
-                           a / 2, b / 2, c / 2, d / 2, tx / 2, ty / 2);
-    affine_transform_plane(srcU, srcUVW / 2, srcUVH, dstU, dstUVW / 2, dstUVH,
-                           a / 2, b / 2, c / 2, d / 2, tx / 2, ty / 2);
+    char input_path[1024];
+    sprintf(input_path, "%s_%dx%d.nv21", inputFile, src.width, src.height);
 
-    // 合并 VU
-    for (int y = 0; y < dstUVH; y++) {
-        for (int x = 0; x < dstUVW / 2; x++) {
-            int idx = y * dstUVW + x * 2;
-            int p = y * (dstUVW / 2) + x;
-            dstVU[idx] = dstV[p]; // V
-            dstVU[idx + 1] = dstU[p]; // U
-        }
-    }
+    char out_path[1024];
+    sprintf(out_path, "%s_%dx%d.nv21", outputFile, dst.width, dst.height);
 
-    free(srcV);
-    free(srcU);
-    free(dstV);
-    free(dstU);
-}
+    // char out_crop_path[1024];
+    // sprintf(out_crop_path, "%s_%dx%d.nv21", outputCropFile, dst_crop_width, dst_crop_height);
 
-// 构造仿射变换矩阵（含逆中心变换）
-void build_affine_matrix(
-    float angle_deg, float scale,
-    float cx, float cy,
-    float dx, float dy,
-    float *a, float *b, float *c, float *d, float *tx, float *ty) {
-    float angle = angle_deg * (float) (M_PI / 180.0);
-    float cosA = cosf(angle) * scale;
-    float sinA = sinf(angle) * scale;
+    // 填充源图像数据（这里只是示例，实际使用中需要加载图像数据）
 
-    *a = cosA;
-    *b = -sinA;
-    *c = sinA;
-    *d = cosA;
+    read_nv21_file(&src, input_path);
 
-    *tx = cx - (*a * dx + *b * dy);
-    *ty = cy - (*c * dx + *d * dy);
-}
+    // 定义仿射变换矩阵
+    // AffineMatrix mat = {
+    //     0.55722648, 0.12144679, -73.8135971,
+    //     -0.12144679,0.55722648, 3.02248176
+    // };
 
-// 高质量仿射接口
-void nv21_affine_transform(
-    const uint8_t *src_nv21, int srcW, int srcH,
-    uint8_t *dst_nv21, int dstW, int dstH,
-    float a, float b, float c, float d, float tx, float ty) {
-    const uint8_t *srcY = src_nv21;
-    const uint8_t *srcVU = src_nv21 + srcW * srcH;
+    AffineMatrix mat = {
+        0.555642, 0.123476, -73.862274 ,
+        -0.123476 ,0.555642, 3.995064,
+    };
 
-    uint8_t *dstY = dst_nv21;
-    uint8_t *dstVU = dst_nv21 + dstW * dstH;
 
-    affine_transform_y(srcY, srcW, srcH, dstY, dstW, dstH, a, b, c, d, tx, ty);
-    affine_transform_vu_high_quality(srcVU, srcW, srcH, dstVU, dstW, dstH, a, b, c, d, tx, ty);
-}
+    // AffineMatrix mat = {0.881481, 0.000000, -36.529630, -0.000000, 0.881481, -9.288889};
+    // AffineMatrix mat = {{
+    //     {1.0, 0.0, 10.0}, // x' = x + 10
+    //     {0.0, 1.0, 10.0}, // y' = y + 10
+    //     {0.0, 0.0, 1.0}
+    // }};
 
-// 示例：读取 input.nv21 -> 输出 output.nv21
-int main() {
-    const int srcW = 640, srcH = 480;
-    const int dstW = 320, dstH = 240;
+    // 执行仿射变换
+    affine_transform(&dst, &src, mat);
 
-    size_t src_size = srcW * srcH * 3 / 2;
-    size_t dst_size = dstW * dstH * 3 / 2;
+    write_nv21_file(&dst, out_path);
 
-    uint8_t *src_nv21 = (uint8_t *) malloc(src_size);
-    uint8_t *dst_nv21 = (uint8_t *) malloc(dst_size);
+    // 释放内存
+    free(src.y_plane);
+    free(src.uv_plane);
+    free(dst.y_plane);
+    free(dst.uv_plane);
 
-    FILE *fsrc = fopen("../input_640x480.nv21", "rb");
-    if (!fsrc) {
-        perror("打开输入失败");
-        return 1;
-    }
-    fread(src_nv21, 1, src_size, fsrc);
-    fclose(fsrc);
-
-    float a, b, c, d, tx, ty;
-    build_affine_matrix(0.0f, 1.0f, srcW / 2.0f, srcH / 2.0f, dstW / 2.0f, dstH / 2.0f, &a, &b, &c, &d, &tx, &ty);
-
-    // a = 0.4330127018922194f;
-    // b = 0.25f;
-    // c = 121.4359353944898f;
-    // d = -0.25f;
-    // tx = 0.4330127018922194f;
-    // ty = 216.0769515458673f;
-
-    nv21_affine_transform(src_nv21, srcW, srcH, dst_nv21, dstW, dstH, a, b, c, d, tx, ty);
-
-    FILE *fdst = fopen("../output_320x240_nocv.nv21", "wb");
-    fwrite(dst_nv21, 1, dst_size, fdst);
-    fclose(fdst);
-
-    free(src_nv21);
-    free(dst_nv21);
-
-    printf("✅ 成功输出: output_320x240_nocv.nv21\n");
     return 0;
 }
-
-// ffplay -f rawvideo -pixel_format nv21 -video_size 320x240 output_320x240_nocv.nv21
-// ffmpeg -f rawvideo -pixel_format nv21 -video_size 320x240 -i output_320x240_nocv.nv21 -frames:v 1 output_320x240_nocv.png
