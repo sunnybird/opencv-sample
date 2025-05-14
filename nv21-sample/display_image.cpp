@@ -84,27 +84,26 @@ cv::Mat nv21ToBGR(const unsigned char* nv21Data, int width, int height)
     // Create a YUV420sp Mat (NV21 format)
     cv::Mat nv21(height + height / 2, width, CV_8UC1, const_cast<unsigned char*>(nv21Data));
 
-    int cropX = 50, cropY = 50, cropWidth = 300, cropHeight = 400;
-    // 裁剪 NV21 数据
-    cv::Mat croppedNv21;
-    if (!cropNV21(nv21,
-                  croppedNv21,
-                  width,
-                  height,
-                  cropX,
-                  cropY,
-                  cropWidth,
-                  cropHeight,
-                  "../data/",
-                  true)) {
-        // return -1;
-    }
+    // int cropX = 50, cropY = 50, cropWidth = 300, cropHeight = 400;
+    // // 裁剪 NV21 数据
+    // cv::Mat croppedNv21;
+    // if (!cropNV21(nv21,
+    //               croppedNv21,
+    //               width,
+    //               height,
+    //               cropX,
+    //               cropY,
+    //               cropWidth,
+    //               cropHeight,
+    //               "../data/",
+    //               true)) {
+    // }
 
     // Create an empty Mat to store BGR image
     cv::Mat bgrImage;
     // Convert NV21 to BGR
-    cv::cvtColor(croppedNv21, bgrImage, cv::COLOR_YUV2BGR_NV21);
-
+    // cv::cvtColor(croppedNv21, bgrImage, cv::COLOR_YUV2BGR_NV21);
+    cv::cvtColor(nv21 , bgrImage, cv::COLOR_YUV2BGR_NV21);
     return bgrImage;
 }
 
